@@ -3,7 +3,8 @@
 A minimal, colorized Markdown renderer for the terminal using [pulldown-cmark](https://github.com/pulldown-cmark/pulldown-cmark) and termcolor.
 
 ## Demo
-[![Watch the video](https://files.catbox.moe/kgub8f.png)](https://files.catbox.moe/54nmuf.webm)
+[Demo](https://github.com/user-attachments/assets/dc35588b-6040-4c76-89b6-86521f867754)
+
 
 ## Quick start
 
