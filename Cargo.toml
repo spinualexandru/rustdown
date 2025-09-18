@@ -1,0 +1,9 @@
+[package]
+name = "rustdown"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+termcolor = "1.4.1"
+pulldown-cmark = { version = "0.13.0", default-features = false, features = ["html", "simd"] }
+clap = { version = "4.3", features = ["derive"] }
