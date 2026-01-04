@@ -1,4 +1,4 @@
-use clap::{arg, Parser};
+use clap::Parser;
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser as MdParser, Tag};
 use std::fs;
 use std::io::{self, Write};
@@ -13,7 +13,6 @@ struct MarkdownRenderer {
     list_depth: usize,
     list_item_number: Vec<usize>,
     current_list_is_ordered: Vec<bool>,
-    list_markers: Vec<String>, // Track actual markers used at each level
     // Track whether the last written character was whitespace/newline
     last_was_space: bool,
     in_emphasis: bool,
@@ -49,7 +48,6 @@ impl MarkdownRenderer {
             list_depth: 0,
             list_item_number: Vec::new(),
             current_list_is_ordered: Vec::new(),
-            list_markers: Vec::new(),
             last_was_space: true,
             in_emphasis: false,
             in_strong: false,
