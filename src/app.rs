@@ -66,10 +66,10 @@ fn read_input(input: Option<String>) -> io::Result<String> {
     match input {
         Some(input) => {
             let path = Path::new(&input);
-            if path.exists() {
-                fs::read_to_string(path)
-            } else {
-                Ok(input)
+            match fs::read_to_string(path) {
+                Ok(content) => Ok(content),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(input),
+                Err(e) => Err(e),
             }
         }
         None => {

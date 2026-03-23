@@ -3,6 +3,49 @@ use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser as MdPa
 use std::io;
 use termcolor::{Color, ColorSpec, WriteColor};
 
+/// Strip ANSI escape sequences and other terminal control characters from a string
+/// to prevent terminal injection attacks via raw HTML in markdown.
+fn strip_terminal_escapes(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            // ESC - skip the entire escape sequence
+            '\x1b' => {
+                // Consume the escape sequence
+                if let Some(next) = chars.next() {
+                    match next {
+                        // CSI sequence: ESC [ ... final_byte
+                        '[' => {
+                            for c in chars.by_ref() {
+                                if c.is_ascii_alphabetic() || c == '@' || c == '~' {
+                                    break;
+                                }
+                            }
+                        }
+                        // OSC sequence: ESC ] ... ST (BEL or ESC \)
+                        ']' => {
+                            let mut prev = ' ';
+                            for c in chars.by_ref() {
+                                if c == '\x07' || (c == '\\' && prev == '\x1b') {
+                                    break;
+                                }
+                                prev = c;
+                            }
+                        }
+                        // Other escape sequences (2-char): skip the next char
+                        _ => {}
+                    }
+                }
+            }
+            // Other C0 control characters (except common whitespace)
+            '\x00'..='\x08' | '\x0b' | '\x0c' | '\x0e'..='\x1a' | '\x7f' => {}
+            _ => result.push(c),
+        }
+    }
+    result
+}
+
 pub fn render_markdown(
     md: &str,
     preserve_fences: bool,
@@ -83,7 +126,8 @@ pub fn render_markdown(
             Event::Text(text) => renderer.write_event_text(&text)?,
             Event::Code(code) => renderer.write_event_code(&code)?,
             Event::Html(html) => {
-                write!(renderer.output, "{}", html)?;
+                let sanitized = strip_terminal_escapes(&html);
+                write!(renderer.output, "{}", sanitized)?;
             }
             Event::SoftBreak => renderer.soft_break()?,
             Event::HardBreak => renderer.hard_break()?,

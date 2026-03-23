@@ -42,9 +42,6 @@ A minimal, colorized Markdown renderer for the terminal using [pulldown-cmark](h
 - Code blocks and inline code
 - Blockquotes, horizontal rules, footnotes
 
-## Requirements
-
-- Rust 1.56+ (edition 2021)
 
 ## License
 WTFPL
