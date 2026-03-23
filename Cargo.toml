@@ -1,5 +1,5 @@
 [package]
-name = "rustdown"
+name = "rustdown-cli"
 version = "0.1.1"
 edition = "2024"
 authors = ["Alex Spinu"]
@@ -10,6 +10,10 @@ documentation = "https://github.com/spinualexandru/rustdown#readme"
 repository = "https://github.com/spinualexandru/rustdown"
 homepage = "https://github.com/spinualexandru/rustdown"
 license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "rustdown"
+path = "src/main.rs"
 
 [dependencies]
 termcolor = "1.4.1"
