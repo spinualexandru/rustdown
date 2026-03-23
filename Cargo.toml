@@ -10,3 +10,4 @@ pulldown-cmark = { version = "0.13.0", default-features = false, features = [
     "simd",
 ] }
 clap = { version = "4.5", features = ["derive"] }
+html2md = "0.2"
