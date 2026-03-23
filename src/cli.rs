@@ -1,5 +1,4 @@
 use clap::Parser;
-use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -7,8 +6,8 @@ use std::path::PathBuf;
     about = "Render Markdown to the terminal with colors"
 )]
 pub(crate) struct Cli {
-    /// Input Markdown file.
-    pub(crate) file: PathBuf,
+    /// Input: a file path or inline Markdown string. Reads from stdin if omitted.
+    pub(crate) input: Option<String>,
 
     /// Preserve original fenced code fences (like ```lang ... ```)
     #[arg(long = "preserve-fences")]
