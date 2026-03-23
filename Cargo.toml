@@ -2,6 +2,14 @@
 name = "rustdown"
 version = "0.1.1"
 edition = "2024"
+authors = ["Alex Spinu"]
+description = "Render markdown/html/html-markdown in the terminal"
+keywords = ["markdown", "terminal", "html", "cli"]
+categories = ["command-line-utilities"]
+documentation = "https://github.com/spinualexandru/rustdown#readme"
+repository = "https://github.com/spinualexandru/rustdown"
+homepage = "https://github.com/spinualexandru/rustdown"
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 termcolor = "1.4.1"
