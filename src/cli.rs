@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -12,4 +12,20 @@ pub(crate) struct Cli {
     /// Preserve original fenced code fences (like ```lang ... ```)
     #[arg(long = "preserve-fences")]
     pub(crate) preserve_fences: bool,
+
+    #[command(subcommand)]
+    pub(crate) command: Option<Command>,
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum Command {
+    /// Convert HTML to Markdown and render it
+    Html {
+        /// HTML string to convert and render
+        input: Option<String>,
+
+        /// Preserve original fenced code fences
+        #[arg(long = "preserve-fences")]
+        preserve_fences: bool,
+    },
 }
