@@ -43,5 +43,3 @@ A minimal, colorized Markdown renderer for the terminal using [pulldown-cmark](h
 - Blockquotes, horizontal rules, footnotes
 
 
-## License
-WTFPL
