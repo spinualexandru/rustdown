@@ -1,6 +1,6 @@
 [package]
 name = "rustdown-cli"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 authors = ["Alex Spinu"]
 description = "Render markdown/html/html-markdown in the terminal"
@@ -17,9 +17,9 @@ path = "src/main.rs"
 
 [dependencies]
 termcolor = "1.4.1"
-pulldown-cmark = { version = "0.13.0", default-features = false, features = [
+pulldown-cmark = { version = "0.13", default-features = false, features = [
     "html",
     "simd",
 ] }
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = "4.6", features = ["derive"] }
 html2md = "0.2"
