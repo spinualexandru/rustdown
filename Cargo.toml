@@ -15,6 +15,10 @@ license = "MIT OR Apache-2.0"
 name = "rustdown"
 path = "src/main.rs"
 
+[lib]
+name = "rustdown"
+path = "src/lib.rs"
+
 [dependencies]
 termcolor = "1.4.1"
 pulldown-cmark = { version = "0.13", default-features = false, features = [
