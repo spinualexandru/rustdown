@@ -1,7 +1,5 @@
 mod app;
 mod cli;
-mod markdown;
-mod render;
 
 use clap::Parser;
 use std::io;

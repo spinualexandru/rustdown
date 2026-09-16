@@ -1,570 +1,471 @@
+mod html;
+mod inline;
+mod layout;
 mod table;
 
-use std::io;
-use termcolor::{Color, ColorSpec, WriteColor};
+use crate::markdown::{Node, parse};
+use layout::*;
+use pulldown_cmark::{BlockQuoteKind, CodeBlockKind, Event, Tag};
+use std::sync::OnceLock;
+use syntect::{
+    easy::HighlightLines,
+    highlighting::{FontStyle, ThemeSet},
+    parsing::SyntaxSet,
+};
+use termcolor::Color;
 
-pub(crate) struct MarkdownRenderer<'a, W: WriteColor + ?Sized> {
-    pub(crate) output: &'a mut W,
-    // State tracking
-    heading_level: Option<u32>,
-    heading_buf: String,
-    list_depth: usize,
-    list_item_number: Vec<usize>,
-    current_list_is_ordered: Vec<bool>,
-    // Track whether the last written character was whitespace/newline
-    last_was_space: bool,
-    in_emphasis: bool,
-    in_strong: bool,
-    in_strikethrough: bool,
-    in_code_block: bool,
-    in_blockquote: bool,
-    in_link: bool,
-    link_url: String,
-    in_image: bool,
-    image_alt: String,
-    image_url: String,
-    // buffer for code blocks
-    code_buf: String,
-    code_lang: Option<String>,
-    preserve_code_fences: bool,
-    // table rendering state
-    in_table: bool,
-    in_table_head: bool,
-    current_cell: String,
-    current_row: Vec<String>,
-    // collected table rows while inside a table
-    table_rows: Vec<Vec<String>>,
-    table_header_count: usize,
+/// How link destinations are displayed. Labels are always retained.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LinkStyle {
+    #[default]
+    Inline,
+    Text,
+    /// OSC 8 links, with inline URLs as fallback for unsupported writers or URI schemes.
+    Hyperlink,
+    /// Deduplicated numeric references and a Links section after the document.
+    Reference,
 }
 
-impl<'a, W: WriteColor + ?Sized> MarkdownRenderer<'a, W> {
-    pub(crate) fn new(output: &'a mut W, preserve_code_fences: bool) -> Self {
+/// Terminal background palette, including optional syntax highlighting.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Theme {
+    #[default]
+    Dark,
+    Light,
+}
+
+/// Explicit, deterministic layout settings for embedding applications.
+#[derive(Clone, Debug)]
+pub struct RenderOptions {
+    /// Available terminal columns (1..=10000). Defaults to 80.
+    pub width: usize,
+    pub preserve_fences: bool,
+    /// Wrap code, preserving spaces and expanding tabs at four-column stops.
+    pub wrap_code: bool,
+    /// Use ASCII decorations, without transliterating document content.
+    pub ascii: bool,
+    pub links: LinkStyle,
+    /// Highlight fenced code with a recognized language. Defaults to false.
+    pub syntax_highlighting: bool,
+    pub theme: Theme,
+}
+impl Default for RenderOptions {
+    fn default() -> Self {
         Self {
-            output,
-            heading_level: None,
-            heading_buf: String::new(),
-            list_depth: 0,
-            list_item_number: Vec::new(),
-            current_list_is_ordered: Vec::new(),
-            last_was_space: true,
-            in_emphasis: false,
-            in_strong: false,
-            in_strikethrough: false,
-            in_code_block: false,
-            in_blockquote: false,
-            in_link: false,
-            link_url: String::new(),
-            in_image: false,
-            image_alt: String::new(),
-            image_url: String::new(),
-            code_buf: String::new(),
-            code_lang: None,
-            preserve_code_fences,
-            in_table: false,
-            in_table_head: false,
-            current_cell: String::new(),
-            current_row: Vec::new(),
-            table_rows: Vec::new(),
-            table_header_count: 0,
+            width: 80,
+            preserve_fences: false,
+            wrap_code: false,
+            ascii: false,
+            links: LinkStyle::Inline,
+            syntax_highlighting: false,
+            theme: Theme::Dark,
+        }
+    }
+}
+
+pub(crate) struct Renderer<'a> {
+    source: &'a str,
+    options: &'a RenderOptions,
+    html_depth: usize,
+    references: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+}
+
+impl<'a> Renderer<'a> {
+    pub(crate) fn new(source: &'a str, options: &'a RenderOptions) -> Self {
+        Self {
+            source,
+            options,
+            html_depth: 0,
+            references: Default::default(),
         }
     }
 
-    pub(crate) fn flush(&mut self) -> io::Result<()> {
-        self.output.flush()
-    }
-
-    pub(crate) fn ensure_newline(&mut self) -> io::Result<()> {
-        if !self.last_was_space {
-            writeln!(self.output)?;
-            self.last_was_space = true;
-        }
-        Ok(())
-    }
-
-    pub(crate) fn set_emphasis(&mut self, on: bool) {
-        self.in_emphasis = on;
-    }
-
-    pub(crate) fn set_strong(&mut self, on: bool) {
-        self.in_strong = on;
-    }
-
-    pub(crate) fn set_strikethrough(&mut self, on: bool) {
-        self.in_strikethrough = on;
-    }
-
-    pub(crate) fn start_heading(&mut self, level: u32) {
-        self.heading_level = Some(level);
-        self.heading_buf.clear();
-    }
-
-    pub(crate) fn push_heading_softbreak(&mut self) {
-        self.heading_buf.push(' ');
-    }
-
-    pub(crate) fn end_heading(&mut self) -> io::Result<()> {
-        if let Some(level) = self.heading_level {
-            let heading_text = self.heading_buf.clone();
-            self.render_heading(level, &heading_text)?;
-        }
-        self.heading_level = None;
-        self.heading_buf.clear();
-        Ok(())
-    }
-
-    pub(crate) fn start_list(&mut self, start_number: Option<u64>) -> io::Result<()> {
-        self.ensure_newline()?;
-
-        let is_ordered = start_number.is_some();
-        self.current_list_is_ordered.push(is_ordered);
-        if is_ordered && self.list_item_number.len() <= self.list_depth {
-            self.list_item_number.push(0);
-        }
-        self.list_depth += 1;
-        Ok(())
-    }
-
-    pub(crate) fn end_list(&mut self) {
-        self.list_depth = self.list_depth.saturating_sub(1);
-        self.current_list_is_ordered.pop();
-        if self.current_list_is_ordered.is_empty() {
-            self.list_item_number.clear();
-        }
-        self.last_was_space = true;
-    }
-
-    pub(crate) fn end_item(&mut self) -> io::Result<()> {
-        writeln!(self.output)?;
-        self.last_was_space = true;
-        Ok(())
-    }
-
-    pub(crate) fn start_link(&mut self, dest_url: &str) {
-        self.in_link = true;
-        self.link_url = dest_url.to_string();
-    }
-
-    pub(crate) fn end_link(&mut self) -> io::Result<()> {
-        if !self.link_url.is_empty() {
-            let mut url_spec = ColorSpec::new();
-            url_spec.set_fg(Some(Color::Cyan));
-            self.output.set_color(&url_spec)?;
-            write!(self.output, " ({})", self.link_url)?;
-            self.output.reset()?;
-        }
-        self.in_link = false;
-        self.link_url.clear();
-        self.last_was_space = false;
-        Ok(())
-    }
-
-    pub(crate) fn start_image(&mut self, dest_url: &str) {
-        self.in_image = true;
-        self.image_url = dest_url.to_string();
-        self.image_alt.clear();
-    }
-
-    pub(crate) fn end_image(&mut self) -> io::Result<()> {
-        let image_url = self.image_url.clone();
-        let image_alt = self.image_alt.clone();
-        self.render_image(&image_url, &image_alt)?;
-        self.in_image = false;
-        self.image_url.clear();
-        self.image_alt.clear();
-        self.last_was_space = false;
-        Ok(())
-    }
-
-    pub(crate) fn start_code_block(
-        &mut self,
-        kind: pulldown_cmark::CodeBlockKind,
-    ) -> io::Result<()> {
-        self.in_code_block = true;
-        self.code_buf.clear();
-        self.code_lang = match kind {
-            pulldown_cmark::CodeBlockKind::Fenced(info) => {
-                let s = info.split_whitespace().next().unwrap_or("").to_string();
-                if s.is_empty() { None } else { Some(s) }
-            }
-            pulldown_cmark::CodeBlockKind::Indented => None,
-        };
-        self.ensure_newline()?;
-        Ok(())
-    }
-
-    pub(crate) fn end_code_block(&mut self) -> io::Result<()> {
-        let code = std::mem::take(&mut self.code_buf);
-        let lang_opt = self.code_lang.take();
-        self.render_code_block(&code, lang_opt.as_deref())?;
-        self.in_code_block = false;
-        Ok(())
-    }
-
-    pub(crate) fn start_blockquote(&mut self) -> io::Result<()> {
-        self.in_blockquote = true;
-        self.render_blockquote_start()
-    }
-
-    pub(crate) fn end_blockquote(&mut self) {
-        self.in_blockquote = false;
-    }
-
-    pub(crate) fn start_table(&mut self) -> io::Result<()> {
-        self.in_table = true;
-        self.in_table_head = false;
-        self.ensure_newline()?;
-        Ok(())
-    }
-
-    pub(crate) fn start_table_head(&mut self) {
-        self.in_table_head = true;
-        self.current_row.clear();
-    }
-
-    pub(crate) fn start_table_row(&mut self) {
-        if !self.in_table_head {
-            self.current_row.clear();
-        }
-    }
-
-    pub(crate) fn start_table_cell(&mut self) {
-        self.current_cell.clear();
-    }
-
-    pub(crate) fn end_table_cell(&mut self) {
-        self.current_row.push(self.current_cell.clone());
-        self.current_cell.clear();
-    }
-
-    pub(crate) fn end_table_row(&mut self) {
-        self.table_rows.push(self.current_row.clone());
-        self.current_row.clear();
-        self.last_was_space = true;
-    }
-
-    pub(crate) fn end_table_head(&mut self) {
-        if !self.current_row.is_empty() {
-            self.table_rows.push(self.current_row.clone());
-            self.current_row.clear();
-        }
-        self.table_header_count = self.table_rows.len();
-        self.in_table_head = false;
-    }
-
-    pub(crate) fn end_table(&mut self) -> io::Result<()> {
-        self.render_table()?;
-        self.table_rows.clear();
-        self.table_header_count = 0;
-        self.in_table = false;
-        writeln!(self.output)?;
-        self.last_was_space = true;
-        Ok(())
-    }
-
-    pub(crate) fn write_event_text(&mut self, text: &str) -> io::Result<()> {
-        if self.in_code_block {
-            self.code_buf.push_str(text);
-            return Ok(());
-        }
-        if self.in_table {
-            self.current_cell.push_str(text);
-            return Ok(());
-        }
-        self.write_text(text)
-    }
-
-    pub(crate) fn write_event_code(&mut self, code: &str) -> io::Result<()> {
-        if self.in_table {
-            self.current_cell.push('`');
-            self.current_cell.push_str(code);
-            self.current_cell.push('`');
-            return Ok(());
-        }
-        if !self.in_code_block {
-            self.render_inline_code(code)?;
-        }
-        Ok(())
-    }
-
-    pub(crate) fn soft_break(&mut self) -> io::Result<()> {
-        if self.heading_level.is_some() {
-            self.push_heading_softbreak();
-            Ok(())
-        } else if self.in_blockquote {
-            self.render_blockquote_start()
-        } else {
-            write!(self.output, " ")?;
-            self.last_was_space = true;
-            Ok(())
-        }
-    }
-
-    pub(crate) fn hard_break(&mut self) -> io::Result<()> {
-        writeln!(self.output)?;
-        self.last_was_space = true;
-        Ok(())
-    }
-
-    pub(crate) fn end_paragraph(&mut self) -> io::Result<()> {
-        if self.list_depth == 0 {
-            writeln!(self.output)?;
-            writeln!(self.output)?;
-        } else {
-            writeln!(self.output)?;
-        }
-        self.last_was_space = true;
-        Ok(())
-    }
-
-    // --- existing rendering routines below (unchanged) ---
-    pub(crate) fn render_heading(&mut self, level: u32, text: &str) -> io::Result<()> {
-        writeln!(self.output)?; // Add spacing before heading
-        match level {
-            1 => {
-                let mut spec = ColorSpec::new();
-                spec.set_fg(Some(Color::Cyan))
-                    .set_intense(true)
-                    .set_bold(true);
-                self.output.set_color(&spec)?;
-                writeln!(self.output, "{}", text)?;
-                self.output.reset()?;
-                writeln!(self.output, "{}", "=".repeat(text.chars().count()))?;
-            }
-            2 => {
-                let mut spec = ColorSpec::new();
-                spec.set_fg(Some(Color::Blue))
-                    .set_intense(true)
-                    .set_bold(true);
-                self.output.set_color(&spec)?;
-                writeln!(self.output, "{}", text)?;
-                self.output.reset()?;
-                writeln!(self.output, "{}", "-".repeat(text.chars().count()))?;
-            }
-            3 => {
-                let mut spec = ColorSpec::new();
-                spec.set_fg(Some(Color::Green)).set_bold(true);
-                self.output.set_color(&spec)?;
-                writeln!(self.output, "### {}", text)?;
-                self.output.reset()?;
-            }
-            4 => {
-                let mut spec = ColorSpec::new();
-                spec.set_fg(Some(Color::Yellow)).set_bold(true);
-                self.output.set_color(&spec)?;
-                writeln!(self.output, "#### {}", text)?;
-                self.output.reset()?;
-            }
-            5 => {
-                let mut spec = ColorSpec::new();
-                spec.set_fg(Some(Color::Magenta));
-                self.output.set_color(&spec)?;
-                writeln!(self.output, "##### {}", text)?;
-                self.output.reset()?;
-            }
-            6 => {
-                let mut spec = ColorSpec::new();
-                spec.set_fg(Some(Color::White)).set_intense(false);
-                self.output.set_color(&spec)?;
-                writeln!(self.output, "###### {}", text)?;
-                self.output.reset()?;
-            }
-            _ => {
-                writeln!(self.output, "{}", text)?;
+    pub(crate) fn document(&self, nodes: &[Node<'_>]) -> Lines {
+        let mut lines = self.sequence(nodes, self.options.width, false);
+        let mut notes = Vec::new();
+        self.notes(nodes, &mut notes);
+        if !notes.is_empty() {
+            join(
+                &mut lines,
+                wrap(
+                    &[span(
+                        "Notes",
+                        Style {
+                            bold: true,
+                            ..Style::accent()
+                        },
+                    )],
+                    self.options.width,
+                ),
+                true,
+            );
+            for (name, children) in notes {
+                let label = span(format!("[^{name}]: "), Style::accent());
+                let content = labeled(
+                    label,
+                    |columns| self.sequence(children, columns, false),
+                    self.options.width,
+                );
+                join(&mut lines, content, true);
             }
         }
-        writeln!(self.output)?; // Add spacing after heading
-        Ok(())
-    }
-
-    pub(crate) fn write_text(&mut self, text: &str) -> io::Result<()> {
-        if self.heading_level.is_some() {
-            self.heading_buf.push_str(text);
-            return Ok(());
-        }
-
-        if self.in_image {
-            self.image_alt.push_str(text);
-            return Ok(());
-        }
-
-        // Handle table cell text with formatting preservation
-        if self.in_table {
-            self.current_cell.push_str(text);
-            return Ok(());
-        }
-
-        let mut spec = ColorSpec::new();
-
-        if self.in_strong {
-            spec.set_bold(true);
-        }
-        if self.in_emphasis {
-            spec.set_italic(true);
-        }
-        if self.in_strikethrough {
-            spec.set_strikethrough(true);
-        }
-        if self.in_link {
-            spec.set_fg(Some(Color::Blue)).set_underline(true);
-        }
-        if self.in_blockquote {
-            spec.set_fg(Some(Color::Yellow));
-        }
-
-        self.output.set_color(&spec)?;
-        write!(self.output, "{}", text)?;
-        self.output.reset()?;
-
-        // Update trailing-space tracking
-        self.last_was_space = text
-            .chars()
-            .rev()
-            .next()
-            .map(|c| c.is_whitespace())
-            .unwrap_or(false);
-
-        Ok(())
-    }
-
-    pub(crate) fn render_list_item_start(&mut self) -> io::Result<()> {
-        let indent = "  ".repeat(self.list_depth.saturating_sub(1));
-
-        let is_ordered = self
-            .current_list_is_ordered
-            .get(self.list_depth.saturating_sub(1))
-            .copied()
-            .unwrap_or(false);
-
-        // Ensure previous content ended on its own line before the list marker
-        if !self.last_was_space {
-            writeln!(self.output)?;
-        }
-
-        if is_ordered {
-            if self.list_depth > self.list_item_number.len() {
-                self.list_item_number.push(1);
-            } else if self.list_depth > 0 {
-                self.list_item_number[self.list_depth - 1] += 1;
+        let references = self.references.borrow();
+        if !references.is_empty() {
+            join(
+                &mut lines,
+                wrap(
+                    &[span(
+                        "Links",
+                        Style {
+                            bold: true,
+                            ..Style::accent()
+                        },
+                    )],
+                    self.options.width,
+                ),
+                true,
+            );
+            lines.push(Vec::new());
+            for (i, uri) in references.iter().enumerate() {
+                join(
+                    &mut lines,
+                    labeled(
+                        span(format!("[{}]: ", i + 1), Style::accent()),
+                        |columns| wrap(&[plain(uri)], columns),
+                        self.options.width,
+                    ),
+                    false,
+                );
             }
-            let num = self
-                .list_item_number
-                .get(self.list_depth.saturating_sub(1))
-                .copied()
-                .unwrap_or(1);
-            write!(self.output, "{}{}. ", indent, num)?;
-        } else {
-            // Improved CommonMark-compatible bullet selection
-            let bullet = match (self.list_depth.saturating_sub(1)) % 3 {
-                0 => "-", // Use dash for top level (more CommonMark compatible)
-                1 => "*", // Asterisk for second level
-                _ => "+", // Plus for third level and beyond
+        }
+        lines
+    }
+
+    fn notes<'n, 's>(&self, nodes: &'n [Node<'s>], out: &mut Vec<(String, &'n [Node<'s>])>) {
+        for node in nodes {
+            if let Node::Element(tag, children, _) = node {
+                if let Tag::FootnoteDefinition(name) = tag {
+                    out.push((name.to_string(), children));
+                } else {
+                    self.notes(children, out);
+                }
+            }
+        }
+    }
+
+    fn sequence(&self, nodes: &[Node<'_>], columns: usize, compact: bool) -> Lines {
+        let mut lines = Vec::new();
+        let mut start = 0;
+        for (i, node) in nodes.iter().enumerate() {
+            if is_block(node) {
+                if start < i {
+                    join(
+                        &mut lines,
+                        wrap(&self.inline(&nodes[start..i], Style::default()), columns),
+                        !compact,
+                    );
+                }
+                join(&mut lines, self.block(node, columns), !compact);
+                start = i + 1;
+            }
+        }
+        if start < nodes.len() {
+            join(
+                &mut lines,
+                wrap(&self.inline(&nodes[start..], Style::default()), columns),
+                !compact,
+            );
+        }
+        lines
+    }
+
+    fn block(&self, node: &Node<'_>, columns: usize) -> Lines {
+        match node {
+            Node::Event(Event::Rule) => vec![vec![span(
+                if self.options.ascii { "-" } else { "─" }.repeat(columns),
+                Style::accent(),
+            )]],
+            Node::Element(tag, children, range) => match tag {
+                Tag::Paragraph => wrap(&self.inline(children, Style::default()), columns),
+                Tag::Heading { level, .. } => {
+                    let level = *level as u8;
+                    let style = Style {
+                        bold: level <= 4,
+                        italic: level >= 5,
+                        fg: if level <= 3 { Some(Color::Cyan) } else { None },
+                        ..Style::default()
+                    };
+                    let mut lines = wrap(&self.inline(children, style), columns);
+                    if level <= 2 {
+                        let length = lines.iter().map(|l| width(l)).max().unwrap_or(0);
+                        lines.push(vec![span(
+                            if level == 1 { "=" } else { "-" }.repeat(length),
+                            Style::accent(),
+                        )]);
+                    }
+                    lines
+                }
+                Tag::List(start) => self.list(children, *start, columns),
+                Tag::BlockQuote(kind) => {
+                    let mut content = self.sequence(
+                        children,
+                        if columns >= 4 { columns - 2 } else { columns },
+                        false,
+                    );
+                    let mut style = Style::muted();
+                    if let Some(kind) = kind {
+                        let label = match kind {
+                            BlockQuoteKind::Note => "NOTE",
+                            BlockQuoteKind::Tip => "TIP",
+                            BlockQuoteKind::Important => "IMPORTANT",
+                            BlockQuoteKind::Warning => "WARNING",
+                            BlockQuoteKind::Caution => "CAUTION",
+                        };
+                        style.fg = Some(match kind {
+                            BlockQuoteKind::Warning | BlockQuoteKind::Caution => Color::Yellow,
+                            BlockQuoteKind::Tip => Color::Green,
+                            _ => Color::Cyan,
+                        });
+                        let mut title = wrap(
+                            &[span(
+                                label,
+                                Style {
+                                    bold: true,
+                                    ..style
+                                },
+                            )],
+                            if columns >= 4 { columns - 2 } else { columns },
+                        );
+                        title.append(&mut content);
+                        content = title;
+                    }
+                    let rail = span(if self.options.ascii { "> " } else { "│ " }, style);
+                    if columns >= 4 {
+                        prefix(content, rail.clone(), rail)
+                    } else {
+                        let mut lines = wrap(&[span(rail.text.trim_end(), rail.style)], columns);
+                        lines.extend(content);
+                        lines
+                    }
+                }
+                Tag::Table(alignments) => self.table(children, alignments, columns),
+                Tag::CodeBlock(kind) => self.code(children, kind, range.clone(), columns),
+                Tag::FootnoteDefinition(_) => Vec::new(),
+                Tag::HtmlBlock => {
+                    let html: String = children
+                        .iter()
+                        .filter_map(|n| match n {
+                            Node::Event(Event::Html(s)) => Some(s.as_ref()),
+                            _ => None,
+                        })
+                        .collect();
+                    let converted = crate::markdown::sanitize(&html2md::parse_html(&html));
+                    if self.html_depth >= 4
+                        || converted.trim() == html.trim()
+                        || converted.trim().is_empty()
+                    {
+                        wrap(&[plain(html.trim_end())], columns)
+                    } else {
+                        let nodes = parse(&converted);
+                        let renderer = Renderer {
+                            source: &converted,
+                            options: self.options,
+                            html_depth: self.html_depth + 1,
+                            references: self.references.clone(),
+                        };
+                        renderer.sequence(&nodes, columns, false)
+                    }
+                }
+                _ => self.sequence(children, columns, false),
+            },
+            _ => Vec::new(),
+        }
+    }
+
+    fn list(&self, items: &[Node<'_>], start: Option<u64>, columns: usize) -> Lines {
+        let loose = items.iter().any(|n| matches!(n, Node::Element(Tag::Item, children, _) if children.iter().any(|c| matches!(c, Node::Element(Tag::Paragraph, _, _)))));
+        let mut out = Vec::new();
+        for (index, item) in items.iter().enumerate() {
+            let Node::Element(Tag::Item, children, _) = item else {
+                continue;
             };
-            write!(self.output, "{}{} ", indent, bullet)?;
+            let task = task_marker(children);
+            let checkbox = task.map(|done| match (done, self.options.ascii) {
+                (true, true) => "[x] ",
+                (false, true) => "[ ] ",
+                (true, false) => "☑ ",
+                (false, false) => "☐ ",
+            });
+            let marker = if let Some(number) = start {
+                format!(
+                    "{}. {}",
+                    number.saturating_add(index as u64),
+                    checkbox.unwrap_or("")
+                )
+            } else {
+                checkbox
+                    .unwrap_or(if self.options.ascii { "- " } else { "• " })
+                    .to_string()
+            };
+            let style = if task == Some(true) {
+                Style {
+                    fg: Some(Color::Green),
+                    ..Style::default()
+                }
+            } else {
+                Style::default()
+            };
+            join(
+                &mut out,
+                labeled(
+                    span(marker, style),
+                    |width| self.sequence(children, width, !loose),
+                    columns,
+                ),
+                loose,
+            );
         }
-        self.last_was_space = false;
-        Ok(())
+        out
     }
 
-    pub(crate) fn render_inline_code(&mut self, code: &str) -> io::Result<()> {
-        let mut spec = ColorSpec::new();
-        spec.set_fg(Some(Color::Red));
-        self.output.set_color(&spec)?;
-        write!(self.output, "`{}`", code)?;
-        self.output.reset()?;
-        self.last_was_space = false;
-        Ok(())
-    }
-
-    pub(crate) fn render_image(&mut self, url: &str, alt: &str) -> io::Result<()> {
-        let mut spec = ColorSpec::new();
-        spec.set_fg(Some(Color::Magenta));
-        self.output.set_color(&spec)?;
-        write!(self.output, "🖼️  [IMAGE: {}]", alt)?;
-        self.output.reset()?;
-
-        let mut url_spec = ColorSpec::new();
-        url_spec.set_fg(Some(Color::Cyan));
-        self.output.set_color(&url_spec)?;
-        write!(self.output, " ({})", url)?;
-        self.output.reset()?;
-        self.last_was_space = false;
-        Ok(())
-    }
-
-    pub(crate) fn render_blockquote_start(&mut self) -> io::Result<()> {
-        let mut spec = ColorSpec::new();
-        spec.set_fg(Some(Color::Yellow));
-        self.output.set_color(&spec)?;
-        // ensure quote starts on a new line
-        if !self.last_was_space {
-            writeln!(self.output)?;
+    fn code(
+        &self,
+        children: &[Node<'_>],
+        kind: &CodeBlockKind<'_>,
+        range: std::ops::Range<usize>,
+        columns: usize,
+    ) -> Lines {
+        let code: String = children
+            .iter()
+            .filter_map(|node| match node {
+                Node::Event(Event::Text(s)) => Some(s.as_ref()),
+                _ => None,
+            })
+            .collect();
+        let info = match kind {
+            CodeBlockKind::Fenced(info) => info.as_ref(),
+            CodeBlockKind::Indented => "",
+        };
+        let mut content = self.code_lines(&code, info.split_whitespace().next().unwrap_or(""));
+        let preserved = self.options.preserve_fences && matches!(kind, CodeBlockKind::Fenced(_));
+        let gutter = !preserved && columns >= 4;
+        if self.options.wrap_code {
+            content = content
+                .iter()
+                .flat_map(|line| wrap_code(line, if gutter { columns - 2 } else { columns }))
+                .collect();
         }
-        write!(self.output, "│ ")?;
-        self.output.reset()?;
-        self.last_was_space = false;
-        Ok(())
-    }
-
-    pub(crate) fn render_rule(&mut self) -> io::Result<()> {
-        let mut spec = ColorSpec::new();
-        spec.set_fg(Some(Color::White)).set_intense(false);
-        self.output.set_color(&spec)?;
-        writeln!(self.output, "{}", "─".repeat(60))?;
-        self.output.reset()?;
-        self.last_was_space = true;
-        Ok(())
-    }
-
-    pub(crate) fn render_task_list_item(&mut self, checked: bool) -> io::Result<()> {
-        let indent = "  ".repeat(self.list_depth.saturating_sub(1));
-        let checkbox = if checked { "☑" } else { "☐" };
-        let mut spec = ColorSpec::new();
-        spec.set_fg(Some(if checked { Color::Green } else { Color::White }));
-        self.output.set_color(&spec)?;
-        write!(self.output, "{}{} ", indent, checkbox)?;
-        self.output.reset()?;
-        Ok(())
-    }
-
-    pub(crate) fn render_code_block(&mut self, code: &str, lang: Option<&str>) -> io::Result<()> {
-        writeln!(self.output)?;
-
-        if self.preserve_code_fences {
-            // Show original fenced block with backticks
-            let mut spec = ColorSpec::new();
-            spec.set_fg(Some(Color::Green)).set_bold(true);
-            self.output.set_color(&spec)?;
-            writeln!(self.output, "```{}", lang.unwrap_or(""))?;
-            self.output.reset()?;
-
-            // Print code without additional indentation
-            for line in code.lines() {
-                writeln!(self.output, "{}", line)?;
+        if preserved {
+            let source = &self.source[range];
+            let opener = source.lines().next().unwrap_or("```");
+            let marker = opener.chars().next().unwrap_or('`');
+            let count = opener.chars().take_while(|&c| c == marker).count();
+            let mut lines = vec![vec![span(opener, Style::accent())]];
+            lines.append(&mut content);
+            if let Some(last) = source.lines().last() {
+                let last = last.trim_start_matches([' ', '\t', '>']);
+                let delimiter = last.trim_end();
+                if source.lines().count() > 1
+                    && delimiter.chars().count() >= count
+                    && delimiter.chars().all(|c| c == marker)
+                {
+                    lines.push(vec![span(last, Style::accent())]);
+                }
             }
-
-            self.output.set_color(&spec)?;
-            writeln!(self.output, "```")?;
-            self.output.reset()?;
+            return lines;
+        }
+        let label = if info.is_empty() { "code" } else { info };
+        let top = if self.options.ascii {
+            format!("+- {label}")
         } else {
-            // Original rendering with language label and indentation
-            if let Some(l) = lang {
-                let mut spec = ColorSpec::new();
-                spec.set_fg(Some(Color::Green)).set_bold(true);
-                self.output.set_color(&spec)?;
-                writeln!(self.output, "[{}]", l)?;
-                self.output.reset()?;
-            }
-            for line in code.lines() {
-                write!(self.output, "    {}\n", line)?;
-            }
+            format!("╭─ {label}")
+        };
+        let mut lines = wrap(&[span(top, Style::accent())], columns);
+        let rail = span(
+            if self.options.ascii { "| " } else { "│ " },
+            Style::accent(),
+        );
+        if gutter {
+            lines.extend(prefix(content, rail.clone(), rail));
+        } else {
+            lines.extend(content);
         }
-
-        writeln!(self.output)?;
-        self.last_was_space = true;
-        Ok(())
+        lines.extend(wrap(
+            &[span(
+                if self.options.ascii { "+-" } else { "╰─" },
+                Style::accent(),
+            )],
+            columns,
+        ));
+        lines
     }
 
-    pub(crate) fn render_table(&mut self) -> io::Result<()> {
-        table::render_table(self)
+    fn code_lines(&self, code: &str, language: &str) -> Lines {
+        static SYNTAXES: OnceLock<SyntaxSet> = OnceLock::new();
+        static THEMES: OnceLock<ThemeSet> = OnceLock::new();
+        if self.options.syntax_highlighting && !language.is_empty() {
+            let syntaxes = SYNTAXES.get_or_init(SyntaxSet::load_defaults_newlines);
+            if let Some(syntax) = syntaxes.find_syntax_by_token(language) {
+                let themes = THEMES.get_or_init(ThemeSet::load_defaults);
+                let theme = if self.options.theme == Theme::Light {
+                    "InspiredGitHub"
+                } else {
+                    "base16-ocean.dark"
+                };
+                let mut highlight = HighlightLines::new(syntax, &themes.themes[theme]);
+                return code
+                    .split_inclusive('\n')
+                    .map(|line| match highlight.highlight_line(line, syntaxes) {
+                        Ok(ranges) => ranges
+                            .into_iter()
+                            .map(|(s, value)| {
+                                span(
+                                    value.trim_end_matches('\n'),
+                                    Style {
+                                        fg: Some(Color::Rgb(
+                                            s.foreground.r,
+                                            s.foreground.g,
+                                            s.foreground.b,
+                                        )),
+                                        bold: s.font_style.contains(FontStyle::BOLD),
+                                        italic: s.font_style.contains(FontStyle::ITALIC),
+                                        underline: s.font_style.contains(FontStyle::UNDERLINE),
+                                        ..Style::default()
+                                    },
+                                )
+                            })
+                            .collect(),
+                        Err(_) => vec![plain(line.trim_end_matches('\n'))],
+                    })
+                    .collect();
+            }
+        }
+        code.lines().map(|line| vec![plain(line)]).collect()
+    }
+}
+
+fn is_block(node: &Node<'_>) -> bool {
+    matches!(
+        node,
+        Node::Event(Event::Rule)
+            | Node::Element(
+                Tag::Paragraph
+                    | Tag::Heading { .. }
+                    | Tag::List(_)
+                    | Tag::BlockQuote(_)
+                    | Tag::CodeBlock(_)
+                    | Tag::Table(_)
+                    | Tag::FootnoteDefinition(_)
+                    | Tag::HtmlBlock,
+                _,
+                _
+            )
+    )
+}
+fn task_marker(nodes: &[Node<'_>]) -> Option<bool> {
+    match nodes.first()? {
+        Node::Event(Event::TaskListMarker(checked)) => Some(*checked),
+        Node::Element(Tag::Paragraph, children, _) => task_marker(children),
+        _ => None,
     }
 }

@@ -1,5 +1,24 @@
 # Rustdown Changelog
 
+## Unreleased
+
+- Support closing fences followed by tabs without modifying code whitespace.
+- Add `--wrap-code`, clickable `--links hyperlink`, and deduplicated `--links reference` modes.
+- Fit deeply nested blocks and long labels into very narrow layouts; escape glyphs that cannot fit.
+- Parse inline HTML attributes with html5ever and support links, images, superscripts/subscripts, and common phrasing tags.
+- Add an optional check against Kitty's native terminal parser, including Unicode cell layout and hyperlink metadata.
+
+- Update direct dependencies to their latest stable releases and refresh the lockfile.
+- Preserve inline content and styles inside headings, tables, links, and images.
+- Correct ordered-list starts, sibling counters, continuation indentation, task markers, nested quotes, and footnote labels.
+- Add terminal-width layout, Unicode column measurement, aligned wrapping tables, and narrow-table records.
+- Add dark/light palettes, optional syntax highlighting, GitHub alerts, compact image labels, and less repetitive links.
+- Add `--width`, `--color`, `--theme`, `--highlight`, `--links`, and `--ascii`, plus library `RenderOptions` and `render_markdown_with_options`.
+- Preserve original fenced-code delimiters and info strings; keep code whitespace without wrapping.
+- Handle mixed HTML locally without reinterpreting the whole Markdown input. Whole-document HTML conversion uses the explicit `html` subcommand.
+- Strip terminal control sequences consistently and honor redirection/`NO_COLOR` in automatic color mode.
+- Add regression coverage for rendering combinations, layout, styles, CLI behavior, and I/O failures.
+
 ## Recent Improvements (September 2025)
 
 ### 🎯 Major Enhancements
